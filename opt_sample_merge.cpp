@@ -7,6 +7,8 @@
 #include <utility>
 #include <vector>
 
+constexpr int alpha = 128;
+
 struct WideSample {
   int value;
   int index;
@@ -114,62 +116,78 @@ std::vector<int> parallel_merge(const std::vector<int> &local_a,
                                 const std::vector<int> &local_b, int node_rank,
                                 int p, int res_size) {
   int n_local = local_a.size();
-  int sample_size = n_local / p;
+  int sample_size = n_local / (p * alpha);
   // int global_n = p * n_local;
 
-  std::vector<WideSample> sample_a(p);
-  std::vector<WideSample> sample_b(p);
+  std::vector<WideSample> sample_a(p * alpha);
+  std::vector<WideSample> sample_b(p * alpha);
 
-  for (int i = 0; i < p; i++) {
-    sample_a[i] = WideSample(local_a[i * sample_size], i * sample_size, node_rank);
-    sample_b[i] = WideSample(local_b[i * sample_size], i * sample_size, node_rank);
+  for (int i = 0; i < alpha * p; i++) {
+    sample_a[i] =
+        WideSample(local_a[i * sample_size], i * sample_size, node_rank);
+    sample_b[i] =
+        WideSample(local_b[i * sample_size], i * sample_size, node_rank);
   }
 
-  std::vector<WideSample> gather_s1(p * p);
-  std::vector<WideSample> gather_s2(p * p);
+  std::vector<WideSample> gather_s1(p * p * alpha);
+  std::vector<WideSample> gather_s2(p * p * alpha);
 
-  MPI_Allgather(sample_a.data(), 3 * p, MPI_INT, gather_s1.data(), 3 * p,
-                MPI_INT, MPI_COMM_WORLD);
-  MPI_Allgather(sample_b.data(), 3 * p, MPI_INT, gather_s2.data(), 3 * p,
-                MPI_INT, MPI_COMM_WORLD);
+  MPI_Allgather(sample_a.data(), 3 * p * alpha, MPI_INT, gather_s1.data(),
+                3 * p * alpha, MPI_INT, MPI_COMM_WORLD);
+  MPI_Allgather(sample_b.data(), 3 * p * alpha, MPI_INT, gather_s2.data(),
+                3 * p * alpha, MPI_INT, MPI_COMM_WORLD);
 
   int grank_bg = node_rank * res_size;
   int grank_en = (node_rank + 1) * res_size;
 
-  auto [cr_bg1, cr_bg2] = coarse_co_rank(gather_s1, gather_s2, grank_bg, sample_size);
-  auto [cr_en1, cr_en2] = coarse_co_rank(gather_s1, gather_s2, grank_en, sample_size);
-  
+  auto [cr_bg1, cr_bg2] =
+      coarse_co_rank(gather_s1, gather_s2, grank_bg, sample_size);
+  auto [cr_en1, cr_en2] =
+      coarse_co_rank(gather_s1, gather_s2, grank_en, sample_size);
+
   // Expand search area slightly up to [cr - 1, cr + 1] establishing a tight
   // mathematically valid bound window
   int window_bg_start_a = std::max(0, (cr_bg1 - 1) * sample_size);
-  int window_bg_end_a = std::min(p * p * sample_size, (cr_bg1 + 1) * sample_size);
+  int window_bg_end_a =
+      std::min(p *alpha* p * sample_size, (cr_bg1 + 1) * sample_size);
   int window_bg_start_b = std::max(0, (cr_bg2 - 1) * sample_size);
-  int window_bg_end_b = std::min(p * p * sample_size, (cr_bg2 + 1) * sample_size);
+  int window_bg_end_b =
+      std::min(p * alpha * p * sample_size, (cr_bg2 + 1) * sample_size);
 
   std::vector<int> bg_window_a = fetch_exact_data(
       local_a, gather_s1, window_bg_start_a, window_bg_end_a, p, sample_size);
   std::vector<int> bg_window_b = fetch_exact_data(
       local_b, gather_s2, window_bg_start_b, window_bg_end_b, p, sample_size);
 
-  auto[fr_bg1, fr_bg2] = fine_co_rank(bg_window_a, bg_window_b, grank_bg - (window_bg_start_a + window_bg_start_b));
+  auto [fr_bg1, fr_bg2] =
+      fine_co_rank(bg_window_a, bg_window_b,
+                   grank_bg - (window_bg_start_a + window_bg_start_b));
   int exact_bg_a = window_bg_start_a + fr_bg1;
   int exact_bg_b = window_bg_start_b + fr_bg2;
 
   int window_en_start_a = std::max(0, (cr_en1 - 1) * sample_size);
-  int window_en_end_a   = std::min(p * p * sample_size, (cr_en1 + 1) * sample_size);
+  int window_en_end_a =
+      std::min(p * alpha * p * sample_size, (cr_en1 + 1) * sample_size);
   int window_en_start_b = std::max(0, (cr_en2 - 1) * sample_size);
-  int window_en_end_b   = std::min(p * p * sample_size, (cr_en2 + 1) * sample_size);
+  int window_en_end_b =
+      std::min(p * alpha * p * sample_size, (cr_en2 + 1) * sample_size);
 
-  // redundant data fetch however it's capped to 3 * sample_size * 4 (each boundary) 
-  std::vector<int> en_window_a = fetch_exact_data(local_a, gather_s1, window_en_start_a, window_en_end_a, p, sample_size);
-  std::vector<int> en_window_b = fetch_exact_data(local_b, gather_s2, window_en_start_b, window_en_end_b, p, sample_size);
-  auto [fr_en1, fr_en2] = fine_co_rank(en_window_a, en_window_b, grank_en - (window_en_start_a + window_en_start_b));
+  // redundant data fetch however it's capped to 3 * sample_size * 4 (each
+  // boundary)
+  std::vector<int> en_window_a = fetch_exact_data(
+      local_a, gather_s1, window_en_start_a, window_en_end_a, p, sample_size);
+  std::vector<int> en_window_b = fetch_exact_data(
+      local_b, gather_s2, window_en_start_b, window_en_end_b, p, sample_size);
+  auto [fr_en1, fr_en2] =
+      fine_co_rank(en_window_a, en_window_b,
+                   grank_en - (window_en_start_a + window_en_start_b));
   int exact_en_a = window_en_start_a + fr_en1;
   int exact_en_b = window_en_start_b + fr_en2;
 
-
-  std::vector<int> data_a = fetch_exact_data(local_a, gather_s1, exact_bg_a, exact_en_a, p, sample_size);
-  std::vector<int> data_b = fetch_exact_data(local_b, gather_s2, exact_bg_b, exact_en_b, p, sample_size);
+  std::vector<int> data_a = fetch_exact_data(local_a, gather_s1, exact_bg_a,
+                                             exact_en_a, p, sample_size);
+  std::vector<int> data_b = fetch_exact_data(local_b, gather_s2, exact_bg_b,
+                                             exact_en_b, p, sample_size);
 
   std::vector<int> res(data_a.size() + data_b.size());
   std::merge(data_a.begin(), data_a.end(), data_b.begin(), data_b.end(),
@@ -184,7 +202,7 @@ std::vector<int> parallel_merge(const std::vector<int> &local_a,
 int main() {
   MPI_Init(nullptr, nullptr);
 
-  int n = 1024*8192;
+  int n = 1024 * 8192;
   int world_size, world_rank;
   MPI_Comm_size(MPI_COMM_WORLD, &world_size);
   MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
